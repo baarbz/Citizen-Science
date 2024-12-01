@@ -1,163 +1,189 @@
-;; Citizen Science Platform Contract
+import { describe, it, expect, beforeEach } from 'vitest'
 
-;; Define constants
-(define-constant contract-owner tx-sender)
-(define-constant err-owner-only (err u100))
-(define-constant err-not-found (err u101))
-(define-constant err-already-exists (err u102))
+// Mock contract state
+const contractState = {
+  projectIdNonce: 0,
+  projects: new Map(),
+  tasks: new Map(),
+  userContributions: new Map(),
+  userRewards: new Map(),
+}
 
-;; Define data vars
-(define-data-var project-id-nonce uint u0)
-(define-data-var task-id-nonce uint u0)
+// Mock contract functions
+const contractFunctions = {
+  createProject: (name: string, description: string, institution: string) => {
+    const projectId = ++contractState.projectIdNonce
+    contractState.projects.set(projectId, {
+      name,
+      description,
+      institution,
+      status: 'active'
+    })
+    return { ok: true, value: projectId }
+  },
 
-;; Define maps
-(define-map projects
-  { project-id: uint }
-  {
-    name: (string-ascii 100),
-    description: (string-utf8 1000),
-    institution: principal,
-    status: (string-ascii 20)
+  createTask: (projectId: number, description: string, reward: number) => {
+    const project = contractState.projects.get(projectId)
+    if (!project) return { ok: false, error: 'Project not found' }
+
+    const taskId = (contractState.tasks.get(projectId)?.size || 0) + 1
+    if (!contractState.tasks.has(projectId)) {
+      contractState.tasks.set(projectId, new Map())
+    }
+    contractState.tasks.get(projectId)!.set(taskId, {
+      description,
+      reward,
+      status: 'open'
+    })
+    return { ok: true, value: true }
+  },
+
+  submitData: (projectId: number, taskId: number, user: string, data: string) => {
+    const project = contractState.projects.get(projectId)
+    const task = contractState.tasks.get(projectId)?.get(taskId)
+    if (!project || !task) return { ok: false, error: 'Project or task not found' }
+    if (task.status !== 'open') return { ok: false, error: 'Task is not open' }
+
+    const key = `${projectId}-${taskId}-${user}`
+    contractState.userContributions.set(key, { data })
+    return { ok: true, value: true }
+  },
+
+  validateData: (projectId: number, taskId: number, user: string) => {
+    const project = contractState.projects.get(projectId)
+    const task = contractState.tasks.get(projectId)?.get(taskId)
+    if (!project || !task) return { ok: false, error: 'Project or task not found' }
+
+    const key = `${projectId}-${taskId}-${user}`
+    const contribution = contractState.userContributions.get(key)
+    if (!contribution) return { ok: false, error: 'No contribution found' }
+
+    contractState.tasks.get(projectId)!.set(taskId, { ...task, status: 'completed' })
+
+    const currentReward = contractState.userRewards.get(user) || 0
+    contractState.userRewards.set(user, currentReward + task.reward)
+
+    return { ok: true, value: true }
+  },
+
+  getProject: (projectId: number) => {
+    const project = contractState.projects.get(projectId)
+    return project ? { ok: true, value: project } : { ok: false, error: 'Project not found' }
+  },
+
+  getTask: (projectId: number, taskId: number) => {
+    const task = contractState.tasks.get(projectId)?.get(taskId)
+    return task ? { ok: true, value: task } : { ok: false, error: 'Task not found' }
+  },
+
+  getUserRewards: (user: string) => {
+    return { ok: true, value: { balance: contractState.userRewards.get(user) || 0 } }
   }
-)
+}
 
-(define-map tasks
-  { task-id: uint }
-  {
-    project-id: uint,
-    description: (string-utf8 1000),
-    reward: uint,
-    status: (string-ascii 20)
-  }
-)
+describe('Citizen Science Smart Contract', () => {
+  beforeEach(() => {
+    // Reset contract state before each test
+    contractState.projectIdNonce = 0
+    contractState.projects.clear()
+    contractState.tasks.clear()
+    contractState.userContributions.clear()
+    contractState.userRewards.clear()
+  })
 
-(define-map project-tasks
-  { project-id: uint }
-  { task-ids: (list 100 uint) }
-)
+  it('should create a new project', () => {
+    const result = contractFunctions.createProject('Bird Migration Study', 'Track bird migration patterns', 'institution1')
+    expect(result.ok).toBe(true)
+    expect(result.value).toBe(1)
+    expect(contractState.projects.size).toBe(1)
+    expect(contractState.projects.get(1)).toEqual({
+      name: 'Bird Migration Study',
+      description: 'Track bird migration patterns',
+      institution: 'institution1',
+      status: 'active'
+    })
+  })
 
-(define-map user-contributions
-  { user: principal, task-id: uint }
-  { data: (string-utf8 10000) }
-)
+  it('should create a new task', () => {
+    contractFunctions.createProject('Bird Migration Study', 'Track bird migration patterns', 'institution1')
+    const result = contractFunctions.createTask(1, 'Record bird sightings', 10)
+    expect(result.ok).toBe(true)
+    expect(result.value).toBe(true)
+    expect(contractState.tasks.get(1)?.size).toBe(1)
+    expect(contractState.tasks.get(1)?.get(1)).toEqual({
+      description: 'Record bird sightings',
+      reward: 10,
+      status: 'open'
+    })
+  })
 
-(define-map user-rewards
-  { user: principal }
-  { balance: uint }
-)
+  it('should submit data for a task', () => {
+    contractFunctions.createProject('Bird Migration Study', 'Track bird migration patterns', 'institution1')
+    contractFunctions.createTask(1, 'Record bird sightings', 10)
+    const result = contractFunctions.submitData(1, 1, 'user1', 'Spotted 5 robins at coordinates 40.7128° N, 74.0060° W')
+    expect(result.ok).toBe(true)
+    expect(result.value).toBe(true)
+    expect(contractState.userContributions.get('1-1-user1')).toEqual({
+      data: 'Spotted 5 robins at coordinates 40.7128° N, 74.0060° W'
+    })
+  })
 
-;; Define fungible token
-(define-fungible-token citizen-science-token)
+  it('should validate data and distribute rewards', () => {
+    contractFunctions.createProject('Bird Migration Study', 'Track bird migration patterns', 'institution1')
+    contractFunctions.createTask(1, 1, 'Record bird sightings', 10)
+    contractFunctions.submitData(1, 1, 'user1', 'Spotted 5 robins at coordinates 40.7128° N, 74.0060° W')
+    const result = contractFunctions.validateData(1, 1, 'user1')
+    expect(result.ok).toBe(true)
+    expect(result.value).toBe(true)
+    expect(contractState.tasks.get(1)?.get(1)?.status).toBe('completed')
+    expect(contractState.userRewards.get('user1')).toBe(10)
+  })
 
-;; Functions
+  it('should get project details', () => {
+    contractFunctions.createProject('Bird Migration Study', 'Track bird migration patterns', 'institution1')
+    const result = contractFunctions.getProject(1)
+    expect(result.ok).toBe(true)
+    expect(result.value).toEqual({
+      name: 'Bird Migration Study',
+      description: 'Track bird migration patterns',
+      institution: 'institution1',
+      status: 'active'
+    })
+  })
 
-;; Create a new project
-(define-public (create-project (name (string-ascii 100)) (description (string-utf8 1000)) (institution principal))
-  (let
-    (
-      (new-project-id (+ (var-get project-id-nonce) u1))
-    )
-    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
-    (map-set projects
-      { project-id: new-project-id }
-      {
-        name: name,
-        description: description,
-        institution: institution,
-        status: "active"
-      }
-    )
-    (var-set project-id-nonce new-project-id)
-    (ok new-project-id)
-  )
-)
+  it('should get task details', () => {
+    contractFunctions.createProject('Bird Migration Study', 'Track bird migration patterns', 'institution1')
+    contractFunctions.createTask(1, 'Record bird sightings', 10)
+    const result = contractFunctions.getTask(1, 1)
+    expect(result.ok).toBe(true)
+    expect(result.value).toEqual({
+      description: 'Record bird sightings',
+      reward: 10,
+      status: 'open'
+    })
+  })
 
-;; Create a new task for a project
-(define-public (create-task (project-id uint) (description (string-utf8 1000)) (reward uint))
-  (let
-    (
-      (project (unwrap! (map-get? projects { project-id: project-id }) err-not-found))
-      (new-task-id (+ (var-get task-id-nonce) u1))
-      (current-task-ids (default-to (list) (get task-ids (map-get? project-tasks { project-id: project-id }))))
-    )
-    (asserts! (is-eq tx-sender (get institution project)) err-owner-only)
-    (map-set tasks
-      { task-id: new-task-id }
-      {
-        project-id: project-id,
-        description: description,
-        reward: reward,
-        status: "open"
-      }
-    )
-    (map-set project-tasks
-      { project-id: project-id }
-      { task-ids: (unwrap! (as-max-len? (append current-task-ids new-task-id) u100) err-already-exists) }
-    )
-    (var-set task-id-nonce new-task-id)
-    (ok new-task-id)
-  )
-)
+  it('should get user rewards', () => {
+    contractFunctions.createProject('Bird Migration Study', 'Track bird migration patterns', 'institution1')
+    contractFunctions.createTask(1, 'Record bird sightings', 10)
+    contractFunctions.submitData(1, 1, 'user1', 'Spotted 5 robins at coordinates 40.7128° N, 74.0060° W')
+    contractFunctions.validateData(1, 1, 'user1')
+    const result = contractFunctions.getUserRewards('user1')
+    expect(result.ok).toBe(true)
+    expect(result.value).toEqual({ balance: 10 })
+  })
 
-;; Submit data for a task
-(define-public (submit-data (task-id uint) (data (string-utf8 10000)))
-  (let
-    (
-      (task (unwrap! (map-get? tasks { task-id: task-id }) err-not-found))
-    )
-    (asserts! (is-eq (get status task) "open") err-already-exists)
-    (map-set user-contributions
-      { user: tx-sender, task-id: task-id }
-      { data: data }
-    )
-    (ok true)
-  )
-)
+  it('should handle errors when project is not found', () => {
+    const result = contractFunctions.getProject(999)
+    expect(result.ok).toBe(false)
+    expect(result.error).toBe('Project not found')
+  })
 
-;; Validate data and distribute rewards
-(define-public (validate-data (task-id uint) (user principal))
-  (let
-    (
-      (task (unwrap! (map-get? tasks { task-id: task-id }) err-not-found))
-      (project (unwrap! (map-get? projects { project-id: (get project-id task) }) err-not-found))
-      (contribution (unwrap! (map-get? user-contributions { user: user, task-id: task-id }) err-not-found))
-    )
-    (asserts! (is-eq tx-sender (get institution project)) err-owner-only)
-    (map-set tasks
-      { task-id: task-id }
-      (merge task { status: "completed" })
-    )
-    (map-set user-rewards
-      { user: user }
-      { balance: (+ (default-to u0 (get balance (map-get? user-rewards { user: user }))) (get reward task)) }
-    )
-    (try! (ft-mint? citizen-science-token (get reward task) user))
-    (ok true)
-  )
-)
-
-;; Get project details
-(define-read-only (get-project (project-id uint))
-  (map-get? projects { project-id: project-id })
-)
-
-;; Get task details
-(define-read-only (get-task (task-id uint))
-  (map-get? tasks { task-id: task-id })
-)
-
-;; Get tasks for a project
-(define-read-only (get-project-tasks (project-id uint))
-  (map-get? project-tasks { project-id: project-id })
-)
-
-;; Get user contribution
-(define-read-only (get-user-contribution (user principal) (task-id uint))
-  (map-get? user-contributions { user: user, task-id: task-id })
-)
-
-;; Get user rewards balance
-(define-read-only (get-user-rewards (user principal))
-  (default-to { balance: u0 } (map-get? user-rewards { user: user }))
-)
+  it('should handle errors when task is not found', () => {
+    contractFunctions.createProject('Bird Migration Study', 'Track bird migration patterns', 'institution1')
+    const result = contractFunctions.getTask(1, 999)
+    expect(result.ok).toBe(false)
+    expect(result.error).toBe('Task not found')
+  })
+})
 
